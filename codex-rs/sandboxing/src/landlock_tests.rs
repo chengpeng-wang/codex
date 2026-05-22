@@ -65,6 +65,7 @@ fn permission_profile_flag_is_included() {
         cwd,
         /*use_legacy_landlock*/ true,
         /*allow_network_for_proxy*/ false,
+        /*sandbox_audit*/ None,
     );
 
     assert_eq!(
@@ -77,6 +78,52 @@ fn permission_profile_flag_is_included() {
             .any(|window| window[0] == "--command-cwd" && window[1] == "/tmp/link"),
         true
     );
+}
+
+#[test]
+fn sandbox_audit_flags_are_included_when_requested() {
+    let command = vec!["/bin/true".to_string()];
+    let command_cwd = Path::new("/tmp/link");
+    let cwd = Path::new("/tmp");
+    let permission_profile = PermissionProfile::read_only();
+    let sandbox_audit = SandboxAuditExecConfig {
+        event_id: "event-1".to_string(),
+        tool_name: "shell".to_string(),
+        call_id: "call-1".to_string(),
+        records_dir: std::path::PathBuf::from("/tmp/audit"),
+        checker_config_dir: Some(std::path::PathBuf::from("/tmp/checker")),
+    };
+
+    let args = create_linux_sandbox_command_args_for_permission_profile(
+        command,
+        command_cwd,
+        &permission_profile,
+        cwd,
+        /*use_legacy_landlock*/ false,
+        /*allow_network_for_proxy*/ false,
+        Some(&sandbox_audit),
+    );
+
+    assert!(
+        args.windows(2)
+            .any(|window| { window[0] == "--sandbox-audit-event-id" && window[1] == "event-1" })
+    );
+    assert!(
+        args.windows(2)
+            .any(|window| { window[0] == "--sandbox-audit-tool-name" && window[1] == "shell" })
+    );
+    assert!(
+        args.windows(2)
+            .any(|window| { window[0] == "--sandbox-audit-call-id" && window[1] == "call-1" })
+    );
+    assert!(
+        args.windows(2).any(|window| {
+            window[0] == "--sandbox-audit-records-dir" && window[1] == "/tmp/audit"
+        })
+    );
+    assert!(args.windows(2).any(|window| {
+        window[0] == "--sandbox-audit-checker-config-dir" && window[1] == "/tmp/checker"
+    }));
 }
 
 #[test]

@@ -2482,6 +2482,39 @@
         }
       ]
     },
+    "SandboxAuditToml": {
+      "additionalProperties": false,
+      "properties": {
+        "checker_config_dir": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            }
+          ],
+          "description": "Directory containing checker/plugin configuration files."
+        },
+        "enabled": {
+          "description": "Enables Linux sandbox filesystem syscall audit and commit gating.",
+          "type": "boolean"
+        },
+        "long_running_command_prefixes": {
+          "description": "Command prefixes that should bypass syscall tracing because they are expected to be long-running. The first implementation reserves this setting for the execution layer.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "records_dir": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            }
+          ],
+          "description": "Directory where per-event audit records are written."
+        }
+      },
+      "type": "object"
+    },
     "SandboxMode": {
       "enum": [
         "read-only",
@@ -4880,6 +4913,15 @@
     "review_model": {
       "description": "Review model override used by the `/review` feature.",
       "type": "string"
+    },
+    "sandbox_audit": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/SandboxAuditToml"
+        }
+      ],
+      "default": null,
+      "description": "Linux-only filesystem syscall audit and commit gate settings."
     },
     "sandbox_mode": {
       "allOf": [

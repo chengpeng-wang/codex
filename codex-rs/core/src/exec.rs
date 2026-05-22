@@ -380,6 +380,7 @@ pub fn build_exec_request(
             network: network.as_ref(),
             sandbox_policy_cwd: sandbox_cwd,
             codex_linux_sandbox_exe: codex_linux_sandbox_exe.as_deref(),
+            sandbox_audit: None,
             use_legacy_landlock,
             windows_sandbox_level,
             windows_sandbox_private_desktop,

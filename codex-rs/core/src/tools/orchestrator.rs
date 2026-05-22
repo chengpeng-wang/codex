@@ -36,8 +36,13 @@ use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::NetworkPolicyRuleAction;
 use codex_protocol::protocol::ReviewDecision;
+use codex_sandbox_audit::AuditAttempt;
+use codex_sandbox_audit::SandboxAuditExecConfig;
+use codex_sandbox_audit::SessionSyscallExport;
+use codex_sandbox_audit::append_session_syscall_records;
 use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxType;
+use std::path::Path;
 
 pub(crate) struct ToolOrchestrator {
     sandbox: SandboxManager,
@@ -92,6 +97,7 @@ impl ToolOrchestrator {
             network_denial_cancellation_token: network_approval
                 .as_ref()
                 .map(ActiveNetworkApproval::cancellation_token),
+            sandbox_audit: attempt.sandbox_audit.clone(),
         };
         let run_result = tool
             .run(req, &attempt_with_network_approval, &attempt_tool_ctx)
@@ -231,6 +237,14 @@ impl ToolOrchestrator {
                 managed_network_active,
             ),
         };
+        let sandbox_audit = Self::sandbox_audit_for_attempt(
+            tool,
+            tool_ctx,
+            turn_ctx,
+            initial_sandbox,
+            &file_system_sandbox_policy,
+            AuditAttempt::Initial,
+        );
 
         // Platform-specific flag gating is handled by SandboxManager::select_initial.
         let use_legacy_landlock = turn_ctx.features.use_legacy_landlock();
@@ -250,6 +264,7 @@ impl ToolOrchestrator {
                 .permissions
                 .windows_sandbox_private_desktop,
             network_denial_cancellation_token: None,
+            sandbox_audit,
         };
 
         let (first_result, first_deferred_network_approval) = Self::run_attempt(
@@ -258,6 +273,12 @@ impl ToolOrchestrator {
             tool_ctx,
             &initial_attempt,
             managed_network_active,
+        )
+        .await;
+        Self::export_sandbox_audit_records(
+            tool_ctx,
+            initial_attempt.sandbox_audit.as_ref(),
+            AuditAttempt::Initial,
         )
         .await;
         match first_result {
@@ -354,13 +375,26 @@ impl ToolOrchestrator {
                         .await?;
                 }
 
+                let retry_sandbox_audit = Self::sandbox_audit_for_attempt(
+                    tool,
+                    tool_ctx,
+                    turn_ctx,
+                    SandboxType::None,
+                    &file_system_sandbox_policy,
+                    AuditAttempt::Retry,
+                );
+                let retry_linux_sandbox_exe = if retry_sandbox_audit.is_some() {
+                    turn_ctx.codex_linux_sandbox_exe.as_ref()
+                } else {
+                    None
+                };
                 let escalated_attempt = SandboxAttempt {
                     sandbox: SandboxType::None,
                     permissions: &turn_ctx.permission_profile,
                     enforce_managed_network: managed_network_active,
                     manager: &self.sandbox,
                     sandbox_cwd,
-                    codex_linux_sandbox_exe: None,
+                    codex_linux_sandbox_exe: retry_linux_sandbox_exe,
                     use_legacy_landlock,
                     windows_sandbox_level: turn_ctx.windows_sandbox_level,
                     windows_sandbox_private_desktop: turn_ctx
@@ -368,6 +402,7 @@ impl ToolOrchestrator {
                         .permissions
                         .windows_sandbox_private_desktop,
                     network_denial_cancellation_token: None,
+                    sandbox_audit: retry_sandbox_audit,
                 };
 
                 // Second attempt.
@@ -379,12 +414,97 @@ impl ToolOrchestrator {
                     managed_network_active,
                 )
                 .await;
+                Self::export_sandbox_audit_records(
+                    tool_ctx,
+                    escalated_attempt.sandbox_audit.as_ref(),
+                    AuditAttempt::Retry,
+                )
+                .await;
                 retry_result.map(|output| OrchestratorRunResult {
                     output,
                     deferred_network_approval: retry_deferred_network_approval,
                 })
             }
             Err(err) => Err(err),
+        }
+    }
+
+    fn sandbox_audit_for_attempt<Rq, Out, T>(
+        tool: &T,
+        tool_ctx: &ToolCtx,
+        turn_ctx: &crate::session::turn_context::TurnContext,
+        sandbox: SandboxType,
+        file_system_sandbox_policy: &codex_protocol::protocol::FileSystemSandboxPolicy,
+        attempt: AuditAttempt,
+    ) -> Option<SandboxAuditExecConfig>
+    where
+        T: ToolRuntime<Rq, Out>,
+    {
+        if !cfg!(target_os = "linux") || !tool.sandbox_audit_support().is_enabled() {
+            return None;
+        }
+        let audit_supported_for_sandbox = match sandbox {
+            SandboxType::None => true,
+            SandboxType::LinuxSeccomp => !file_system_sandbox_policy.has_full_disk_write_access(),
+            SandboxType::MacosSeatbelt | SandboxType::WindowsRestrictedToken => false,
+        };
+        if !audit_supported_for_sandbox {
+            return None;
+        }
+        turn_ctx.config.sandbox_audit.for_event(
+            flat_tool_name(&tool_ctx.tool_name),
+            &tool_ctx.call_id,
+            attempt,
+        )
+    }
+
+    async fn export_sandbox_audit_records(
+        tool_ctx: &ToolCtx,
+        sandbox_audit: Option<&SandboxAuditExecConfig>,
+        attempt: AuditAttempt,
+    ) {
+        let Some(sandbox_audit) = sandbox_audit else {
+            return;
+        };
+        let session_id = tool_ctx.session.session_id().to_string();
+        let thread_id = tool_ctx.session.thread_id().to_string();
+        let turn_id = tool_ctx.turn.sub_id.clone();
+        let rollout_path = match tool_ctx.session.current_rollout_path().await {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                tracing::warn!(
+                    event_id = %sandbox_audit.event_id,
+                    call_id = %tool_ctx.call_id,
+                    "skipping sandbox audit syscall session artifact: no local rollout path"
+                );
+                return;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    event_id = %sandbox_audit.event_id,
+                    call_id = %tool_ctx.call_id,
+                    "skipping sandbox audit syscall session artifact: failed to locate rollout path: {err:#}"
+                );
+                return;
+            }
+        };
+
+        match append_sandbox_audit_records_to_rollout(
+            rollout_path.as_path(),
+            session_id.as_str(),
+            thread_id.as_str(),
+            turn_id.as_str(),
+            sandbox_audit,
+            attempt,
+        ) {
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    event_id = %sandbox_audit.event_id,
+                    call_id = %tool_ctx.call_id,
+                    "failed to append sandbox audit syscall session artifact: {err}"
+                );
+            }
         }
     }
 
@@ -485,8 +605,139 @@ impl ToolOrchestrator {
     }
 }
 
+fn append_sandbox_audit_records_to_rollout(
+    rollout_path: &Path,
+    session_id: &str,
+    thread_id: &str,
+    turn_id: &str,
+    sandbox_audit: &SandboxAuditExecConfig,
+    attempt: AuditAttempt,
+) -> Result<usize, codex_sandbox_audit::SandboxAuditError> {
+    let event_dir = sandbox_audit.event_dir();
+    append_session_syscall_records(SessionSyscallExport {
+        rollout_path,
+        event_dir: event_dir.as_path(),
+        session_id,
+        thread_id,
+        turn_id,
+        attempt,
+    })
+}
+
 fn build_denial_reason_from_output(_output: &ExecToolCallOutput) -> String {
     // Keep approval reason terse and stable for UX/tests, but accept the
     // output so we can evolve heuristics later without touching call sites.
     "command failed; retry without sandbox?".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_sandbox_audit::FS_RECORD_SCHEMA_VERSION;
+    use codex_sandbox_audit::FsAccessKind;
+    use codex_sandbox_audit::FsRecordSource;
+    use codex_sandbox_audit::FsSyscallRecord;
+    use codex_sandbox_audit::SESSION_SYSCALL_RECORD_SCHEMA_VERSION;
+    use codex_sandbox_audit::SandboxAuditEventMetadata;
+    use codex_sandbox_audit::SessionSyscallRecord;
+    use codex_sandbox_audit::session_syscall_artifact_path;
+    use codex_sandbox_audit::write_event_metadata;
+    use pretty_assertions::assert_eq;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    #[test]
+    fn appends_sandbox_audit_records_to_current_rollout_artifact() {
+        let temp = tempdir().expect("temp dir");
+        let records_dir = temp.path().join("events");
+        let event_id = "event-1";
+        let event_dir = records_dir.join(event_id);
+        fs::create_dir_all(&event_dir).expect("create event dir");
+        write_event_metadata(
+            &event_dir,
+            &SandboxAuditEventMetadata {
+                schema_version: FS_RECORD_SCHEMA_VERSION,
+                event_id: event_id.to_string(),
+                tool_name: "shell".to_string(),
+                call_id: "call-1".to_string(),
+                command: vec!["bash".to_string(), "-lc".to_string(), "touch x".to_string()],
+                cwd: PathBuf::from("/tmp/work"),
+                sandbox: "linux-seccomp-bwrap".to_string(),
+                started_at_unix_ms: 123,
+            },
+        )
+        .expect("write event metadata");
+        let fs_record = FsSyscallRecord {
+            schema_version: FS_RECORD_SCHEMA_VERSION,
+            seq: 0,
+            event_id: event_id.to_string(),
+            source: FsRecordSource::Strace,
+            pid: Some(123),
+            tid: Some(123),
+            syscall: "openat".to_string(),
+            paths: vec!["/tmp/example.txt".to_string()],
+            access: FsAccessKind::Write,
+            args: BTreeMap::new(),
+            result: Some("3".to_string()),
+            errno: None,
+            raw: Some("123 openat(...) = 3".to_string()),
+        };
+        let mut fs_records = fs::File::create(event_dir.join(codex_sandbox_audit::FS_RECORDS_FILE))
+            .expect("create fs records");
+        serde_json::to_writer(&mut fs_records, &fs_record).expect("write fs record");
+        fs_records.write_all(b"\n").expect("write newline");
+        let rollout_path = temp.path().join("rollout-2026-05-21T21-55-31-id.jsonl");
+        let sandbox_audit = SandboxAuditExecConfig {
+            event_id: event_id.to_string(),
+            tool_name: "shell".to_string(),
+            call_id: "call-1".to_string(),
+            records_dir,
+            checker_config_dir: None,
+        };
+
+        let count = append_sandbox_audit_records_to_rollout(
+            &rollout_path,
+            "session-1",
+            "thread-1",
+            "turn-1",
+            &sandbox_audit,
+            AuditAttempt::Initial,
+        )
+        .expect("append records");
+
+        assert_eq!(count, 1);
+        let contents = fs::read_to_string(session_syscall_artifact_path(&rollout_path))
+            .expect("read session artifact");
+        let record: SessionSyscallRecord =
+            serde_json::from_str(contents.trim()).expect("parse session record");
+        assert_eq!(
+            record,
+            SessionSyscallRecord {
+                schema_version: SESSION_SYSCALL_RECORD_SCHEMA_VERSION,
+                session_id: "session-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                call_id: "call-1".to_string(),
+                tool_name: "shell".to_string(),
+                event_id: event_id.to_string(),
+                attempt: AuditAttempt::Initial,
+                command: vec!["bash".to_string(), "-lc".to_string(), "touch x".to_string()],
+                cwd: PathBuf::from("/tmp/work"),
+                seq: 0,
+                source: FsRecordSource::Strace,
+                pid: Some(123),
+                tid: Some(123),
+                syscall: "openat".to_string(),
+                paths: vec!["/tmp/example.txt".to_string()],
+                access: FsAccessKind::Write,
+                args: BTreeMap::new(),
+                result: Some("3".to_string()),
+                errno: None,
+                raw: Some("123 openat(...) = 3".to_string()),
+            }
+        );
+    }
 }

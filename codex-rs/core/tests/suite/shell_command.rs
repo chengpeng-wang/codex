@@ -219,6 +219,62 @@ async fn pipe_output_without_login() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn danger_full_access_shell_audit_exports_syscalls_and_blocks_output_delete()
+-> anyhow::Result<()> {
+    use codex_sandbox_audit::EVENT_METADATA_FILE;
+    use codex_sandbox_audit::session_syscall_artifact_path;
+
+    let records_dir = tempfile::tempdir()?;
+    let records_path = records_dir.path().to_path_buf();
+    let harness = shell_command_harness_with(move |builder| {
+        builder.with_model("gpt-5.4").with_config(move |config| {
+            config.sandbox_audit.enabled = true;
+            config.sandbox_audit.records_dir = records_path;
+            config.sandbox_audit.checker_config_dir = None;
+        })
+    })
+    .await?;
+
+    let call_id = "danger-full-audit-call";
+    mount_shell_responses(
+        &harness,
+        call_id,
+        "mkdir -p output && printf keep > output/keep.txt && printf scratch > scratch.txt && rm -f scratch.txt; rm -rf output",
+        /*login*/ None,
+    )
+    .await;
+    harness
+        .submit("run audited danger-full-access command")
+        .await?;
+
+    let output = harness.function_call_stdout(call_id).await;
+    assert!(output.contains("Exit code: "));
+    assert!(output.contains("Operation not permitted"));
+    assert!(harness.path_exists("output/keep.txt").await?);
+    assert!(!harness.path_exists("scratch.txt").await?);
+
+    let rollout_path = harness
+        .test()
+        .codex
+        .rollout_path()
+        .expect("rollout path should exist");
+    let syscalls = std::fs::read_to_string(session_syscall_artifact_path(&rollout_path))?;
+    assert!(syscalls.contains(call_id));
+    assert!(syscalls.contains("output/keep.txt"));
+    assert!(syscalls.contains("EPERM"));
+
+    let event_dir = std::fs::read_dir(records_dir.path())?
+        .next()
+        .expect("audit event dir should exist")?
+        .path();
+    let metadata = std::fs::read_to_string(event_dir.join(EVENT_METADATA_FILE))?;
+    assert!(metadata.contains("linux-direct-ptrace"));
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_command_times_out_with_timeout_ms() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));

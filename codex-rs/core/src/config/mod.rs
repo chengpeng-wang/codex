@@ -46,6 +46,7 @@ use codex_config::types::MemoriesConfig;
 use codex_config::types::ModelAvailabilityNuxConfig;
 use codex_config::types::Notice;
 use codex_config::types::OAuthCredentialsStoreMode;
+use codex_config::types::SandboxAuditToml;
 use codex_config::types::SessionPickerViewMode;
 use codex_config::types::ToolSuggestConfig;
 use codex_config::types::ToolSuggestDisabledTool;
@@ -100,6 +101,7 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_sandbox_audit::SandboxAuditConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
 use rmcp::model::ElicitationCapability;
@@ -811,6 +813,9 @@ pub struct Config {
 
     /// Directory where Codex writes log files (defaults to `$CODEX_HOME/log`).
     pub log_dir: PathBuf,
+
+    /// Linux filesystem syscall audit and sandbox commit gate settings.
+    pub sandbox_audit: SandboxAuditConfig,
 
     /// Directory where Codex writes effective session config lock files.
     pub config_lock_export_dir: Option<AbsolutePathBuf>,
@@ -2147,6 +2152,7 @@ pub struct ConfigOverrides {
     pub tools_web_search_request: Option<bool>,
     pub ephemeral: Option<bool>,
     pub bypass_hook_trust: Option<bool>,
+    pub sandbox_audit_enabled: Option<bool>,
     /// Additional directories that should be treated as writable roots for this session.
     pub additional_writable_roots: Vec<PathBuf>,
     /// Explicit runtime workspace roots for this session. When set, this is
@@ -2310,6 +2316,49 @@ fn resolve_terminal_resize_reflow_config(config_toml: &ConfigToml) -> TerminalRe
             None => TerminalResizeReflowMaxRows::Auto,
         },
     }
+}
+
+fn resolve_sandbox_audit_config(
+    toml: Option<SandboxAuditToml>,
+    enabled_override: Option<bool>,
+    codex_home: &AbsolutePathBuf,
+) -> std::io::Result<SandboxAuditConfig> {
+    let toml = toml.unwrap_or_default();
+    let records_dir = toml
+        .records_dir
+        .map(AbsolutePathBuf::into_path_buf)
+        .unwrap_or_else(|| {
+            codex_home
+                .join("sandbox-audit")
+                .join("events")
+                .into_path_buf()
+        });
+    let enabled = enabled_override
+        .or(toml.enabled)
+        .unwrap_or(cfg!(target_os = "linux"));
+    let checker_config_dir = toml.checker_config_dir.map(AbsolutePathBuf::into_path_buf);
+
+    if enabled && !cfg!(target_os = "linux") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sandbox_audit is only supported on Linux",
+        ));
+    }
+    if enabled && !codex_sandbox_audit::strace_available() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "sandbox_audit requires `strace` to be installed and available on PATH",
+        ));
+    }
+    if enabled {
+        std::fs::create_dir_all(&records_dir)?;
+    }
+
+    Ok(SandboxAuditConfig {
+        enabled,
+        records_dir,
+        checker_config_dir,
+    })
 }
 
 fn multi_agent_v2_toml_config(features: Option<&FeaturesToml>) -> Option<&MultiAgentV2ConfigToml> {
@@ -2544,6 +2593,7 @@ impl Config {
             tools_web_search_request: override_tools_web_search_request,
             ephemeral,
             bypass_hook_trust,
+            sandbox_audit_enabled,
             additional_writable_roots,
             workspace_roots: workspace_roots_override,
         } = overrides;
@@ -3319,6 +3369,8 @@ impl Config {
             .as_ref()
             .map(AbsolutePathBuf::to_path_buf)
             .unwrap_or_else(|| codex_home.join("log").to_path_buf());
+        let sandbox_audit =
+            resolve_sandbox_audit_config(cfg.sandbox_audit, sandbox_audit_enabled, &codex_home)?;
         let sqlite_home = cfg
             .sqlite_home
             .as_ref()
@@ -3524,6 +3576,7 @@ impl Config {
             codex_home,
             sqlite_home,
             log_dir,
+            sandbox_audit,
             config_lock_export_dir: cfg
                 .debug
                 .as_ref()

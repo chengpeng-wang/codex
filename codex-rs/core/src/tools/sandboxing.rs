@@ -19,6 +19,7 @@ use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
+use codex_sandbox_audit::SandboxAuditExecConfig;
 use codex_sandboxing::SandboxCommand;
 use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxTransformError;
@@ -347,6 +348,18 @@ pub(crate) trait Sandboxable {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SandboxAuditSupport {
+    Disabled,
+    LinuxShellCommand,
+}
+
+impl SandboxAuditSupport {
+    pub(crate) fn is_enabled(self) -> bool {
+        matches!(self, Self::LinuxShellCommand)
+    }
+}
+
 pub(crate) struct ToolCtx {
     pub session: Arc<Session>,
     pub turn: Arc<TurnContext>,
@@ -361,6 +374,10 @@ pub(crate) enum ToolError {
 }
 
 pub(crate) trait ToolRuntime<Req, Out>: Approvable<Req> + Sandboxable {
+    fn sandbox_audit_support(&self) -> SandboxAuditSupport {
+        SandboxAuditSupport::Disabled
+    }
+
     fn network_approval_spec(&self, _req: &Req, _ctx: &ToolCtx) -> Option<NetworkApprovalSpec> {
         None
     }
@@ -388,6 +405,7 @@ pub(crate) struct SandboxAttempt<'a> {
     pub windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel,
     pub windows_sandbox_private_desktop: bool,
     pub network_denial_cancellation_token: Option<CancellationToken>,
+    pub sandbox_audit: Option<SandboxAuditExecConfig>,
 }
 
 impl<'a> SandboxAttempt<'a> {
@@ -408,6 +426,7 @@ impl<'a> SandboxAttempt<'a> {
                 codex_linux_sandbox_exe: self
                     .codex_linux_sandbox_exe
                     .map(std::path::PathBuf::as_path),
+                sandbox_audit: self.sandbox_audit.clone(),
                 use_legacy_landlock: self.use_legacy_landlock,
                 windows_sandbox_level: self.windows_sandbox_level,
                 windows_sandbox_private_desktop: self.windows_sandbox_private_desktop,

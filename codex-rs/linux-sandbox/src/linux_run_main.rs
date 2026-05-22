@@ -17,9 +17,11 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 
+use crate::audit::SandboxAuditRun;
 use crate::bwrap::BwrapNetworkMode;
 use crate::bwrap::BwrapOptions;
 use crate::bwrap::create_bwrap_command_args;
+use crate::direct_audit::run_direct_audit;
 use crate::landlock::apply_permission_profile_to_current_thread;
 use crate::launcher::exec_bwrap;
 use crate::launcher::preferred_bwrap_supports_argv0;
@@ -29,6 +31,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_protocol::protocol::NetworkSandboxPolicy;
+use codex_sandbox_audit::SandboxAuditExecConfig;
 use codex_sandboxing::landlock::CODEX_LINUX_SANDBOX_ARG0;
 
 static BWRAP_CHILD_PID: AtomicI32 = AtomicI32::new(0);
@@ -132,6 +135,30 @@ pub struct LandlockCommand {
     #[arg(long = "no-proc", default_value_t = false)]
     pub no_proc: bool,
 
+    /// Internal sandbox audit event id.
+    #[arg(long = "sandbox-audit-event-id", hide = true)]
+    pub sandbox_audit_event_id: Option<String>,
+
+    /// Internal sandbox audit tool name.
+    #[arg(long = "sandbox-audit-tool-name", hide = true)]
+    pub sandbox_audit_tool_name: Option<String>,
+
+    /// Internal sandbox audit call id.
+    #[arg(long = "sandbox-audit-call-id", hide = true)]
+    pub sandbox_audit_call_id: Option<String>,
+
+    /// Internal sandbox audit records root.
+    #[arg(long = "sandbox-audit-records-dir", hide = true)]
+    pub sandbox_audit_records_dir: Option<PathBuf>,
+
+    /// Internal sandbox audit checker configuration root.
+    #[arg(long = "sandbox-audit-checker-config-dir", hide = true)]
+    pub sandbox_audit_checker_config_dir: Option<PathBuf>,
+
+    /// Internal: run the command without sandboxing under the direct audit tracer.
+    #[arg(long = "sandbox-audit-direct", hide = true, default_value_t = false)]
+    pub sandbox_audit_direct: bool,
+
     /// Full command args to run under the Linux sandbox helper.
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
@@ -154,11 +181,31 @@ pub fn run_main() -> ! {
         allow_network_for_proxy,
         proxy_route_spec,
         no_proc,
+        sandbox_audit_event_id,
+        sandbox_audit_tool_name,
+        sandbox_audit_call_id,
+        sandbox_audit_records_dir,
+        sandbox_audit_checker_config_dir,
+        sandbox_audit_direct,
         command,
     } = LandlockCommand::parse();
 
     if command.is_empty() {
         panic!("No command specified to execute.");
+    }
+    let sandbox_audit = sandbox_audit_config_from_args(
+        sandbox_audit_event_id,
+        sandbox_audit_tool_name,
+        sandbox_audit_call_id,
+        sandbox_audit_records_dir,
+        sandbox_audit_checker_config_dir,
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
+    if sandbox_audit_direct {
+        let sandbox_audit =
+            sandbox_audit.unwrap_or_else(|| panic!("direct sandbox audit requires audit config"));
+        let command_cwd = command_cwd.as_deref().unwrap_or(&sandbox_policy_cwd);
+        run_direct_audit(sandbox_audit, command, command_cwd);
     }
     ensure_inner_stage_mode_is_valid(apply_seccomp_then_exec, use_legacy_landlock);
     let EffectivePermissions {
@@ -172,6 +219,9 @@ pub fn run_main() -> ! {
         network_sandbox_policy,
         &sandbox_policy_cwd,
     );
+    if sandbox_audit.is_some() && use_legacy_landlock {
+        panic!("sandbox audit is only supported by the bubblewrap Linux sandbox");
+    }
 
     // Inner stage: apply seccomp/no_new_privs after bubblewrap has already
     // established the filesystem view.
@@ -195,6 +245,10 @@ pub fn run_main() -> ! {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
         exec_or_panic(command);
+    }
+
+    if file_system_sandbox_policy.has_full_disk_write_access() && sandbox_audit.is_some() {
+        panic!("sandbox audit requires a restricted filesystem policy");
     }
 
     if file_system_sandbox_policy.has_full_disk_write_access() && !allow_network_for_proxy {
@@ -222,6 +276,7 @@ pub fn run_main() -> ! {
             } else {
                 None
             };
+        let audit_command = command.clone();
         let inner = build_inner_seccomp_command(InnerSeccompCommandArgs {
             sandbox_policy_cwd: &sandbox_policy_cwd,
             command_cwd: command_cwd.as_deref(),
@@ -230,15 +285,17 @@ pub fn run_main() -> ! {
             proxy_route_spec,
             command,
         });
-        run_bwrap_with_proc_fallback(
-            &sandbox_policy_cwd,
-            command_cwd.as_deref(),
-            &file_system_sandbox_policy,
+        run_bwrap_with_proc_fallback(BwrapRunRequest {
+            sandbox_policy_cwd: &sandbox_policy_cwd,
+            command_cwd: command_cwd.as_deref(),
+            file_system_sandbox_policy: &file_system_sandbox_policy,
             network_sandbox_policy,
             inner,
-            !no_proc,
+            mount_proc: !no_proc,
             allow_network_for_proxy,
-        );
+            sandbox_audit,
+            audit_command,
+        });
     }
 
     // Legacy path: Landlock enforcement only, when bwrap sandboxing is not enabled.
@@ -278,6 +335,30 @@ fn parse_permission_profile(value: &str) -> std::result::Result<PermissionProfil
     serde_json::from_str(value).map_err(|err| format!("invalid permission profile JSON: {err}"))
 }
 
+fn sandbox_audit_config_from_args(
+    event_id: Option<String>,
+    tool_name: Option<String>,
+    call_id: Option<String>,
+    records_dir: Option<PathBuf>,
+    checker_config_dir: Option<PathBuf>,
+) -> std::result::Result<Option<SandboxAuditExecConfig>, String> {
+    match (event_id, tool_name, call_id, records_dir) {
+        (None, None, None, None) => Ok(None),
+        (Some(event_id), Some(tool_name), Some(call_id), Some(records_dir)) => {
+            Ok(Some(SandboxAuditExecConfig {
+                event_id,
+                tool_name,
+                call_id,
+                records_dir,
+                checker_config_dir,
+            }))
+        }
+        _ => {
+            Err("sandbox audit requires event id, tool name, call id, and records dir".to_string())
+        }
+    }
+}
+
 fn resolve_permission_profile(
     permission_profile: Option<PermissionProfile>,
 ) -> Result<EffectivePermissions, ResolvePermissionProfileError> {
@@ -314,15 +395,30 @@ fn ensure_legacy_landlock_mode_supports_policy(
     }
 }
 
-fn run_bwrap_with_proc_fallback(
-    sandbox_policy_cwd: &Path,
-    command_cwd: Option<&Path>,
-    file_system_sandbox_policy: &FileSystemSandboxPolicy,
+struct BwrapRunRequest<'a> {
+    sandbox_policy_cwd: &'a Path,
+    command_cwd: Option<&'a Path>,
+    file_system_sandbox_policy: &'a FileSystemSandboxPolicy,
     network_sandbox_policy: NetworkSandboxPolicy,
     inner: Vec<String>,
     mount_proc: bool,
     allow_network_for_proxy: bool,
-) -> ! {
+    sandbox_audit: Option<SandboxAuditExecConfig>,
+    audit_command: Vec<String>,
+}
+
+fn run_bwrap_with_proc_fallback(request: BwrapRunRequest<'_>) -> ! {
+    let BwrapRunRequest {
+        sandbox_policy_cwd,
+        command_cwd,
+        file_system_sandbox_policy,
+        network_sandbox_policy,
+        inner,
+        mount_proc,
+        allow_network_for_proxy,
+        sandbox_audit,
+        audit_command,
+    } = request;
     let network_mode = bwrap_network_mode(network_sandbox_policy, allow_network_for_proxy);
     let mut mount_proc = mount_proc;
     let command_cwd = command_cwd.unwrap_or(sandbox_policy_cwd);
@@ -346,6 +442,24 @@ fn run_bwrap_with_proc_fallback(
         network_mode,
         ..Default::default()
     };
+    let mut options = options;
+    let (audit_run, inner) = match sandbox_audit {
+        Some(config) => {
+            let audit_run = SandboxAuditRun::prepare(
+                config,
+                file_system_sandbox_policy,
+                sandbox_policy_cwd,
+                inner,
+                command_cwd,
+                audit_command,
+            )
+            .unwrap_or_else(|err| panic!("failed to prepare sandbox audit event: {err}"));
+            options.writable_root_overrides = audit_run.writable_root_overrides();
+            let inner = audit_run.wrapped_inner_command();
+            (Some(audit_run), inner)
+        }
+        None => (None, inner),
+    };
     let mut bwrap_args = build_bwrap_argv(
         inner,
         file_system_sandbox_policy,
@@ -354,8 +468,11 @@ fn run_bwrap_with_proc_fallback(
         options,
     )
     .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
+    if let Some(audit_run) = &audit_run {
+        audit_run.append_event_bind(&mut bwrap_args.args);
+    }
     apply_inner_command_argv0(&mut bwrap_args.args);
-    run_or_exec_bwrap(bwrap_args);
+    run_or_exec_bwrap(bwrap_args, audit_run);
 }
 
 fn bwrap_network_mode(
@@ -486,16 +603,20 @@ fn resolve_true_command() -> String {
     "true".to_string()
 }
 
-fn run_or_exec_bwrap(bwrap_args: crate::bwrap::BwrapArgs) -> ! {
+fn run_or_exec_bwrap(bwrap_args: crate::bwrap::BwrapArgs, audit_run: Option<SandboxAuditRun>) -> ! {
     if bwrap_args.synthetic_mount_targets.is_empty()
         && bwrap_args.protected_create_targets.is_empty()
+        && audit_run.is_none()
     {
         exec_bwrap(bwrap_args.args, bwrap_args.preserved_files);
     }
-    run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args);
+    run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args, audit_run);
 }
 
-fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::BwrapArgs) -> ! {
+fn run_bwrap_in_child_with_synthetic_mount_cleanup(
+    bwrap_args: crate::bwrap::BwrapArgs,
+    audit_run: Option<SandboxAuditRun>,
+) -> ! {
     let crate::bwrap::BwrapArgs {
         args,
         preserved_files,
@@ -543,7 +664,8 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
         || cleanup_protected_create_targets(&protected_create_registrations);
     signal_forwarders.restore();
     cleanup_signal_mask.restore();
-    exit_with_wait_status_or_policy_violation(status, protected_create_violation);
+    let audit_denied = audit_run.as_ref().is_some_and(SandboxAuditRun::finalize);
+    exit_with_wait_status_or_policy_violation(status, protected_create_violation, audit_denied);
 }
 
 impl ProtectedCreateMonitor {
@@ -1277,8 +1399,12 @@ fn exit_with_wait_status(status: libc::c_int) -> ! {
 fn exit_with_wait_status_or_policy_violation(
     status: libc::c_int,
     protected_create_violation: bool,
+    audit_denied: bool,
 ) -> ! {
-    if protected_create_violation && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+    if (protected_create_violation || audit_denied)
+        && libc::WIFEXITED(status)
+        && libc::WEXITSTATUS(status) == 0
+    {
         std::process::exit(1);
     }
 

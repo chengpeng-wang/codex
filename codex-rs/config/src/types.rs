@@ -199,6 +199,24 @@ pub struct FeedbackConfigToml {
     pub enabled: Option<bool>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct SandboxAuditToml {
+    /// Enables Linux sandbox filesystem syscall audit and commit gating.
+    pub enabled: Option<bool>,
+
+    /// Directory containing checker/plugin configuration files.
+    pub checker_config_dir: Option<AbsolutePathBuf>,
+
+    /// Directory where per-event audit records are written.
+    pub records_dir: Option<AbsolutePathBuf>,
+
+    /// Command prefixes that should bypass syscall tracing because they are
+    /// expected to be long-running. The first implementation reserves this
+    /// setting for the execution layer.
+    pub long_running_command_prefixes: Option<Vec<String>>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolSuggestDiscoverableType {

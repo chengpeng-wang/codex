@@ -5,6 +5,7 @@ use crate::bwrap::is_wsl1;
 use crate::landlock::CODEX_LINUX_SANDBOX_ARG0;
 use crate::landlock::allow_network_for_proxy;
 use crate::landlock::create_linux_sandbox_command_args_for_permission_profile;
+use crate::landlock::create_linux_sandbox_direct_audit_command_args;
 use crate::policy_transforms::effective_permission_profile;
 use crate::policy_transforms::should_require_platform_sandbox;
 use codex_network_proxy::NetworkProxy;
@@ -14,6 +15,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_sandbox_audit::SandboxAuditExecConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -98,6 +100,7 @@ pub struct SandboxTransformRequest<'a> {
     pub network: Option<&'a NetworkProxy>,
     pub sandbox_policy_cwd: &'a Path,
     pub codex_linux_sandbox_exe: Option<&'a Path>,
+    pub sandbox_audit: Option<SandboxAuditExecConfig>,
     pub use_legacy_landlock: bool,
     pub windows_sandbox_level: WindowsSandboxLevel,
     pub windows_sandbox_private_desktop: bool,
@@ -177,6 +180,7 @@ impl SandboxManager {
             network,
             sandbox_policy_cwd,
             codex_linux_sandbox_exe,
+            sandbox_audit,
             use_legacy_landlock,
             windows_sandbox_level,
             windows_sandbox_private_desktop,
@@ -191,7 +195,28 @@ impl SandboxManager {
         argv.extend(command.args.into_iter().map(OsString::from));
 
         let (argv, arg0_override) = match sandbox {
-            SandboxType::None => (os_argv_to_strings(argv), None),
+            SandboxType::None => {
+                let command_argv = os_argv_to_strings(argv);
+                match sandbox_audit.as_ref() {
+                    #[cfg(target_os = "linux")]
+                    Some(sandbox_audit) => {
+                        let exe = codex_linux_sandbox_exe
+                            .ok_or(SandboxTransformError::MissingLinuxSandboxExecutable)?;
+                        let mut args = create_linux_sandbox_direct_audit_command_args(
+                            command_argv,
+                            command.cwd.as_path(),
+                            sandbox_policy_cwd,
+                            sandbox_audit,
+                        );
+                        let mut full_command = Vec::with_capacity(1 + args.len());
+                        full_command
+                            .push(os_string_to_command_component(exe.as_os_str().to_owned()));
+                        full_command.append(&mut args);
+                        (full_command, Some(linux_sandbox_arg0_override(exe)))
+                    }
+                    _ => (command_argv, None),
+                }
+            }
             #[cfg(target_os = "macos")]
             SandboxType::MacosSeatbelt => {
                 use crate::seatbelt::CreateSeatbeltCommandArgsParams;
@@ -232,6 +257,7 @@ impl SandboxManager {
                     sandbox_policy_cwd,
                     use_legacy_landlock,
                     allow_proxy_network,
+                    sandbox_audit.as_ref(),
                 );
                 let mut full_command = Vec::with_capacity(1 + args.len());
                 full_command.push(os_string_to_command_component(exe.as_os_str().to_owned()));

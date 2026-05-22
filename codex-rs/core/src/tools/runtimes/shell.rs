@@ -29,6 +29,7 @@ use crate::tools::sandboxing::ApprovalCtx;
 use crate::tools::sandboxing::ExecApprovalRequirement;
 use crate::tools::sandboxing::PermissionRequestPayload;
 use crate::tools::sandboxing::SandboxAttempt;
+use crate::tools::sandboxing::SandboxAuditSupport;
 use crate::tools::sandboxing::Sandboxable;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
@@ -198,6 +199,10 @@ impl Approvable<ShellRequest> for ShellRuntime {
 }
 
 impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
+    fn sandbox_audit_support(&self) -> SandboxAuditSupport {
+        SandboxAuditSupport::LinuxShellCommand
+    }
+
     fn network_approval_spec(
         &self,
         req: &ShellRequest,

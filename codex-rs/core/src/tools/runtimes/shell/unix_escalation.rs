@@ -924,6 +924,7 @@ impl CoreShellCommandExecutor {
             network: self.network.as_ref(),
             sandbox_policy_cwd: &self.sandbox_policy_cwd,
             codex_linux_sandbox_exe: self.codex_linux_sandbox_exe.as_deref(),
+            sandbox_audit: None,
             use_legacy_landlock: self.use_legacy_landlock,
             windows_sandbox_level: self.windows_sandbox_level,
             windows_sandbox_private_desktop: false,

@@ -20,6 +20,7 @@ use crate::types::Notice;
 use crate::types::OAuthCredentialsStoreMode;
 use crate::types::OtelConfigToml;
 use crate::types::PluginConfig;
+use crate::types::SandboxAuditToml;
 use crate::types::SandboxWorkspaceWrite;
 use crate::types::ShellEnvironmentPolicyToml;
 use crate::types::SkillsConfig;
@@ -192,6 +193,10 @@ pub struct ConfigToml {
 
     /// Sandbox configuration to apply if `sandbox` is `WorkspaceWrite`.
     pub sandbox_workspace_write: Option<SandboxWorkspaceWrite>,
+
+    /// Linux-only filesystem syscall audit and commit gate settings.
+    #[serde(default)]
+    pub sandbox_audit: Option<SandboxAuditToml>,
 
     /// Default permissions profile to apply. Names starting with `:` refer to
     /// built-in profiles; other names are resolved from the `[permissions]`

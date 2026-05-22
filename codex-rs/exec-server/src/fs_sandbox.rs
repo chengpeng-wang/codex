@@ -110,6 +110,7 @@ impl FileSystemSandboxRunner {
                 network: None,
                 sandbox_policy_cwd: cwd.as_path(),
                 codex_linux_sandbox_exe: self.runtime_paths.codex_linux_sandbox_exe.as_deref(),
+                sandbox_audit: None,
                 use_legacy_landlock: sandbox_context.use_legacy_landlock,
                 windows_sandbox_level: sandbox_context.windows_sandbox_level,
                 windows_sandbox_private_desktop: sandbox_context.windows_sandbox_private_desktop,

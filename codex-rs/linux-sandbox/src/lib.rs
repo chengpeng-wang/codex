@@ -4,11 +4,15 @@
 //! - in-process restrictions (`no_new_privs` + seccomp), and
 //! - bubblewrap for filesystem isolation.
 #[cfg(target_os = "linux")]
+mod audit;
+#[cfg(target_os = "linux")]
 mod bazel_bwrap;
 #[cfg(target_os = "linux")]
 mod bundled_bwrap;
 #[cfg(target_os = "linux")]
 mod bwrap;
+#[cfg(target_os = "linux")]
+mod direct_audit;
 #[cfg(target_os = "linux")]
 mod exec_util;
 #[cfg(target_os = "linux")]

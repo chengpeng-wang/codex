@@ -266,9 +266,18 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         sandbox_mode: sandbox_mode_cli_arg,
         dangerously_bypass_approvals_and_sandbox,
         bypass_hook_trust,
+        sandbox_audit,
+        no_sandbox_audit,
         cwd,
         add_dir,
     } = shared;
+    let sandbox_audit_enabled = if sandbox_audit {
+        Some(true)
+    } else if no_sandbox_audit {
+        Some(false)
+    } else {
+        None
+    };
 
     let (_stdout_with_ansi, stderr_with_ansi) = match color {
         cli::Color::Always => (true, true),
@@ -431,6 +440,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         tools_web_search_request: None,
         ephemeral: ephemeral.then_some(true),
         bypass_hook_trust: bypass_hook_trust.then_some(true),
+        sandbox_audit_enabled,
         additional_writable_roots: add_dir,
     };
 

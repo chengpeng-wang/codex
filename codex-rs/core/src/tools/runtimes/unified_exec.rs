@@ -27,6 +27,7 @@ use crate::tools::sandboxing::ApprovalCtx;
 use crate::tools::sandboxing::ExecApprovalRequirement;
 use crate::tools::sandboxing::PermissionRequestPayload;
 use crate::tools::sandboxing::SandboxAttempt;
+use crate::tools::sandboxing::SandboxAuditSupport;
 use crate::tools::sandboxing::Sandboxable;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
@@ -219,6 +220,10 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
 }
 
 impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRuntime<'a> {
+    fn sandbox_audit_support(&self) -> SandboxAuditSupport {
+        SandboxAuditSupport::LinuxShellCommand
+    }
+
     fn sandbox_cwd<'b>(&self, req: &'b UnifiedExecRequest) -> Option<&'b AbsolutePathBuf> {
         Some(&req.sandbox_cwd)
     }
@@ -370,6 +375,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
 mod tests {
     use super::*;
     use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
+    use crate::tools::sandboxing::SandboxAuditSupport;
     use crate::tools::sandboxing::ToolRuntime;
     use codex_exec_server::Environment;
     use std::time::Duration;
@@ -432,5 +438,16 @@ mod tests {
         };
 
         assert_eq!(runtime.sandbox_cwd(&request), Some(&sandbox_cwd));
+    }
+
+    #[test]
+    fn unified_exec_opts_in_to_shell_sandbox_audit() {
+        let manager = UnifiedExecProcessManager::default();
+        let runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
+
+        assert_eq!(
+            runtime.sandbox_audit_support(),
+            SandboxAuditSupport::LinuxShellCommand
+        );
     }
 }

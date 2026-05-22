@@ -1046,6 +1046,7 @@ pub async fn run_main(
         main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
         show_raw_agent_reasoning: cli.oss.then_some(true),
         bypass_hook_trust: cli.bypass_hook_trust.then_some(true),
+        sandbox_audit_enabled: cli.sandbox_audit_enabled_override(),
         additional_writable_roots: additional_dirs,
         ..Default::default()
     };

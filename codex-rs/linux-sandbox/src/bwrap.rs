@@ -56,7 +56,7 @@ const LINUX_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
 const MAX_UNREADABLE_GLOB_MATCHES: usize = 8192;
 
 /// Options that control how bubblewrap is invoked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BwrapOptions {
     /// Whether to mount a fresh `/proc` inside the sandbox.
     ///
@@ -65,6 +65,11 @@ pub(crate) struct BwrapOptions {
     pub mount_proc: bool,
     /// How networking should be configured inside the bubblewrap sandbox.
     pub network_mode: BwrapNetworkMode,
+    /// Optional host-side sources to bind for writable sandbox roots.
+    ///
+    /// This is used by sandbox audit transactions to direct writes into a
+    /// staged copy of each writable root before deciding whether to commit.
+    pub writable_root_overrides: BTreeMap<PathBuf, PathBuf>,
     /// Optional maximum depth for expanding unreadable glob patterns with ripgrep.
     ///
     /// Keep this uncapped by default so existing nested deny-read matches are
@@ -77,6 +82,7 @@ impl Default for BwrapOptions {
         Self {
             mount_proc: true,
             network_mode: BwrapNetworkMode::FullAccess,
+            writable_root_overrides: BTreeMap::new(),
             glob_scan_max_depth: None,
         }
     }
@@ -306,9 +312,10 @@ fn create_bwrap_flags(
         preserved_files,
         synthetic_mount_targets,
         protected_create_targets,
-    } = create_filesystem_args(
+    } = create_filesystem_args_with_overrides(
         file_system_sandbox_policy,
         sandbox_policy_cwd,
+        &options.writable_root_overrides,
         options
             .glob_scan_max_depth
             .or(file_system_sandbox_policy.glob_scan_max_depth),
@@ -364,9 +371,24 @@ fn create_bwrap_flags(
 ///    those writable roots so protected subpaths win.
 /// 6. Nested unreadable carveouts under a writable root are masked after that
 ///    root is bound, and unrelated unreadable roots are masked afterward.
+#[cfg(test)]
 fn create_filesystem_args(
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     cwd: &Path,
+    glob_scan_max_depth: Option<usize>,
+) -> Result<BwrapArgs> {
+    create_filesystem_args_with_overrides(
+        file_system_sandbox_policy,
+        cwd,
+        &BTreeMap::new(),
+        glob_scan_max_depth,
+    )
+}
+
+fn create_filesystem_args_with_overrides(
+    file_system_sandbox_policy: &FileSystemSandboxPolicy,
+    cwd: &Path,
+    writable_root_overrides: &BTreeMap<PathBuf, PathBuf>,
     glob_scan_max_depth: Option<usize>,
 ) -> Result<BwrapArgs> {
     let unreadable_globs = file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd);
@@ -564,8 +586,12 @@ fn create_filesystem_args(
         }
 
         let mount_root = symlink_target.as_deref().unwrap_or(root);
+        let mount_source = writable_root_overrides
+            .get(root)
+            .map(PathBuf::as_path)
+            .unwrap_or(mount_root);
         bwrap_args.args.push("--bind".to_string());
-        bwrap_args.args.push(path_to_string(mount_root));
+        bwrap_args.args.push(path_to_string(mount_source));
         bwrap_args.args.push(path_to_string(mount_root));
 
         let mut read_only_subpaths: Vec<PathBuf> = writable_root
@@ -1342,6 +1368,58 @@ mod tests {
     #[test]
     fn default_unreadable_glob_scan_has_no_depth_cap() {
         assert_eq!(BwrapOptions::default().glob_scan_max_depth, None);
+    }
+
+    #[test]
+    fn writable_root_overrides_bind_staged_source_to_host_target() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let host_root = temp_dir.path().join("host");
+        let staged_root = temp_dir.path().join("stage");
+        std::fs::create_dir_all(&host_root).expect("create host root");
+        std::fs::create_dir_all(&staged_root).expect("create staged root");
+        let host_root =
+            AbsolutePathBuf::from_absolute_path(&host_root).expect("absolute host root");
+        let mut writable_root_overrides = BTreeMap::new();
+        writable_root_overrides.insert(host_root.as_path().to_path_buf(), staged_root.clone());
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Root,
+                },
+                access: FileSystemAccessMode::Read,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: host_root.clone(),
+                },
+                access: FileSystemAccessMode::Write,
+            },
+        ]);
+
+        let args = create_bwrap_command_args(
+            vec!["/bin/true".to_string()],
+            &policy,
+            temp_dir.path(),
+            temp_dir.path(),
+            BwrapOptions {
+                writable_root_overrides,
+                ..Default::default()
+            },
+        )
+        .expect("create bwrap args");
+
+        assert!(
+            args.args.windows(3).any(|window| {
+                window
+                    == [
+                        "--bind",
+                        staged_root.to_string_lossy().as_ref(),
+                        host_root.to_string_lossy().as_ref(),
+                    ]
+            }),
+            "expected staged source to be bound to host root: {:#?}",
+            args.args
+        );
     }
 
     fn unreadable_glob_entry(pattern: String) -> FileSystemSandboxEntry {

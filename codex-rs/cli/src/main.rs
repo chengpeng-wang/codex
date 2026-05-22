@@ -1675,6 +1675,7 @@ async fn run_debug_prompt_input_command(
     } else {
         shared.sandbox_mode.map(Into::into)
     };
+    let sandbox_audit_enabled = shared.sandbox_audit_enabled_override();
     let overrides = ConfigOverrides {
         model: shared.model,
         approval_policy,
@@ -1686,6 +1687,7 @@ async fn run_debug_prompt_input_command(
         show_raw_agent_reasoning: shared.oss.then_some(true),
         ephemeral: Some(true),
         bypass_hook_trust: shared.bypass_hook_trust.then_some(true),
+        sandbox_audit_enabled,
         additional_writable_roots: shared.add_dir,
         ..Default::default()
     };

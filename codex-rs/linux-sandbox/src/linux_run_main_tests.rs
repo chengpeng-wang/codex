@@ -234,6 +234,39 @@ fn split_only_filesystem_policy_requires_direct_runtime_enforcement() {
 }
 
 #[test]
+fn sandbox_audit_args_require_full_tuple() {
+    let missing_records = sandbox_audit_config_from_args(
+        Some("event".to_string()),
+        Some("shell".to_string()),
+        Some("call".to_string()),
+        None,
+        None,
+    );
+    assert!(missing_records.is_err());
+
+    let config = sandbox_audit_config_from_args(
+        Some("event".to_string()),
+        Some("shell".to_string()),
+        Some("call".to_string()),
+        Some(PathBuf::from("/tmp/audit")),
+        Some(PathBuf::from("/tmp/checker")),
+    )
+    .expect("parse audit args")
+    .expect("audit config");
+
+    assert_eq!(
+        config,
+        SandboxAuditExecConfig {
+            event_id: "event".to_string(),
+            tool_name: "shell".to_string(),
+            call_id: "call".to_string(),
+            records_dir: PathBuf::from("/tmp/audit"),
+            checker_config_dir: Some(PathBuf::from("/tmp/checker")),
+        }
+    );
+}
+
+#[test]
 fn root_write_read_only_carveout_requires_direct_runtime_enforcement() {
     let temp_dir = tempfile::TempDir::new().expect("tempdir");
     let docs = temp_dir.path().join("docs");

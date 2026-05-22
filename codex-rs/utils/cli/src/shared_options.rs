@@ -53,6 +53,18 @@ pub struct SharedCliOptions {
     #[arg(long = "dangerously-bypass-hook-trust", default_value_t = false)]
     pub bypass_hook_trust: bool,
 
+    /// Enable Linux sandbox filesystem syscall audit and commit gating.
+    #[arg(
+        long = "sandbox-audit",
+        default_value_t = false,
+        conflicts_with = "no_sandbox_audit"
+    )]
+    pub sandbox_audit: bool,
+
+    /// Disable Linux sandbox filesystem syscall audit and commit gating.
+    #[arg(long = "no-sandbox-audit", default_value_t = false)]
+    pub no_sandbox_audit: bool,
+
     /// Tell the agent to use the specified directory as its working root.
     #[clap(long = "cd", short = 'C', value_name = "DIR")]
     pub cwd: Option<PathBuf>,
@@ -75,6 +87,8 @@ impl SharedCliOptions {
             sandbox_mode,
             dangerously_bypass_approvals_and_sandbox,
             bypass_hook_trust,
+            sandbox_audit,
+            no_sandbox_audit,
             cwd,
             add_dir,
         } = self;
@@ -87,6 +101,8 @@ impl SharedCliOptions {
             sandbox_mode: root_sandbox_mode,
             dangerously_bypass_approvals_and_sandbox: root_dangerously_bypass_approvals_and_sandbox,
             bypass_hook_trust: root_bypass_hook_trust,
+            sandbox_audit: root_sandbox_audit,
+            no_sandbox_audit: root_no_sandbox_audit,
             cwd: root_cwd,
             add_dir: root_add_dir,
         } = root;
@@ -112,6 +128,10 @@ impl SharedCliOptions {
         }
         if !*bypass_hook_trust {
             *bypass_hook_trust = *root_bypass_hook_trust;
+        }
+        if !*sandbox_audit && !*no_sandbox_audit {
+            *sandbox_audit = *root_sandbox_audit;
+            *no_sandbox_audit = *root_no_sandbox_audit;
         }
         if cwd.is_none() {
             cwd.clone_from(root_cwd);
@@ -140,6 +160,8 @@ impl SharedCliOptions {
             sandbox_mode,
             dangerously_bypass_approvals_and_sandbox,
             bypass_hook_trust,
+            sandbox_audit,
+            no_sandbox_audit,
             cwd,
             add_dir,
         } = subcommand;
@@ -164,6 +186,10 @@ impl SharedCliOptions {
         if bypass_hook_trust {
             self.bypass_hook_trust = true;
         }
+        if sandbox_audit || no_sandbox_audit {
+            self.sandbox_audit = sandbox_audit;
+            self.no_sandbox_audit = no_sandbox_audit;
+        }
         if let Some(cwd) = cwd {
             self.cwd = Some(cwd);
         }
@@ -172,6 +198,16 @@ impl SharedCliOptions {
         }
         if !add_dir.is_empty() {
             self.add_dir.extend(add_dir);
+        }
+    }
+
+    pub fn sandbox_audit_enabled_override(&self) -> Option<bool> {
+        if self.sandbox_audit {
+            Some(true)
+        } else if self.no_sandbox_audit {
+            Some(false)
+        } else {
+            None
         }
     }
 }

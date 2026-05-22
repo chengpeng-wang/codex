@@ -2521,6 +2521,7 @@ dependencies = [
  "codex-rmcp-client",
  "codex-rollout",
  "codex-rollout-trace",
+ "codex-sandbox-audit",
  "codex-sandboxing",
  "codex-shell-command",
  "codex-shell-escalation",
@@ -3030,6 +3031,7 @@ dependencies = [
  "codex-install-context",
  "codex-process-hardening",
  "codex-protocol",
+ "codex-sandbox-audit",
  "codex-sandboxing",
  "codex-utils-absolute-path",
  "globset",
@@ -3585,6 +3587,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-sandbox-audit"
+version = "0.0.0"
+dependencies = [
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "codex-sandboxing"
 version = "0.0.0"
 dependencies = [
@@ -3592,6 +3606,7 @@ dependencies = [
  "async-trait",
  "codex-network-proxy",
  "codex-protocol",
+ "codex-sandbox-audit",
  "codex-utils-absolute-path",
  "dunce",
  "libc",
